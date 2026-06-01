@@ -1,4 +1,10 @@
 
+### 0. Установка
+
+```bash
+sudo apt update
+sudo apt install slapd ldap-utils
+```
 
 Мы будем использовать утилиты из пакета `ldap-utils`, в частности команду `ldapadd`, для добавления записей из LDIF-файлов.
 
