@@ -1,24 +1,125 @@
+# Лабораторная работа: Развёртывание и настройка OpenLDAP на Debian 12
 
-### 0. Установка
+## Цель работы
+
+Освоить установку, базовую настройку и управление сервером OpenLDAP в Debian 12. Научиться создавать организационные единицы, пользователей и группы, а также проверять работу каталога с помощью утилит командной строки.
+
+## Предварительные требования
+
+- Виртуальная машина или физический сервер с чистым Debian 12 (Bookworm).
+- Права root или пользователь с sudo.
+- Настроенный FQDN (например, `ldap.corp.local`).
+- Базовые навыки работы в командной строке Linux.
+
+## Теоретическая справка
+
+**OpenLDAP** — это свободная реализация протокола LDAP (Lightweight Directory Access Protocol), предназначенная для централизованного хранения информации о пользователях, группах и других ресурсах сети. В Debian 12 используется OpenLDAP версии 2.5+ с backend'ом MDB и динамической конфигурацией через `cn=config`.
+
+**Ключевые компоненты:**
+- `slapd` — основной демон сервера LDAP.
+- `ldap-utils` — набор утилит командной строки (`ldapadd`, `ldapsearch`, `ldapmodify`).
+- **LDIF** (LDAP Data Interchange Format) — текстовый формат для описания записей каталога.
+
+---
+
+## Часть 1. Подготовка системы
+
+### 1.1. Настройка FQDN
+
+Установите полное доменное имя для сервера:
 
 ```bash
-sudo apt update
-sudo apt install slapd ldap-utils
+sudo hostnamectl set-hostname ldap.corp.local
 ```
 
-Мы будем использовать утилиты из пакета `ldap-utils`, в частности команду `ldapadd`, для добавления записей из LDIF-файлов.
-
-### 1. Создание организационных единиц (OU)
-
-Прежде чем добавлять пользователей, необходимо создать контейнеры (организационные единицы), в которых они будут храниться. Обычно это `people` (или `users`) для пользователей и `groups` для групп.
-
-Для этого создайте файл, например `base.ldif`:
+Отредактируйте файл `/etc/hosts`, добавив запись:
 
 ```bash
-sudo nano base.ldif
+sudo nano /etc/hosts
 ```
 
-Вставьте в него следующее содержимое, **обязательно заменив** `dc=corp,dc=local` на ваше доменное имя (суффикс), которое вы указали при установке slapd:
+Добавьте строку (замените IP на адрес вашей ВМ):
+
+```
+127.0.1.1   ldap.corp.local ldap
+```
+
+Проверьте:
+
+```bash
+hostname -f
+ping -c 3 ldap.corp.local
+```
+
+Ожидаемый результат: `ldap.corp.local` и успешные ответы ping.
+
+### 1.2. Обновление пакетов
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+---
+
+## Часть 2. Установка OpenLDAP
+
+### 2.1. Установка пакетов
+
+```bash
+sudo apt install -y slapd ldap-utils
+```
+
+Во время установки будет предложено задать пароль администратора LDAP. **Запомните его** — он понадобится для управления каталогом.
+
+### 2.2. Проверка статуса службы
+
+```bash
+sudo systemctl status slapd
+```
+
+Служба должна быть активна (`active (running)`). Если она не запущена:
+
+```bash
+sudo systemctl enable --now slapd
+```
+
+---
+
+## Часть 3. Первичная конфигурация slapd
+
+### 3.1. Реконфигурация через dpkg-reconfigure
+
+По умолчанию при установке создаётся база с суффиксом, производным от FQDN. Для учебных целей удобнее задать понятный домен, например `corp.local`:
+
+```bash
+sudo dpkg-reconfigure slapd
+```
+
+
+
+### 3.2. Проверка базовой структуры
+
+Проверьте, что сервер отвечает и база создана:
+
+```bash
+ldapsearch -x -H ldap://localhost -b "dc=corp,dc=local" -s base
+```
+
+В выводе должны быть атрибуты `namingContexts: dc=corp,dc=local` и `objectClass: domain`.
+
+---
+
+## Часть 4. Создание организационных единиц (OU)
+
+Организационные единицы — это «папки» внутри каталога, которые упорядочивают записи. Создадим две OU: `people` для пользователей и `groups` для групп.
+
+### 4.1. Создание LDIF-файла
+
+```bash
+nano ~/base.ldif
+```
+
+Содержимое:
 
 ```ldif
 dn: ou=people,dc=corp,dc=local
@@ -30,101 +131,198 @@ objectClass: organizationalUnit
 ou: groups
 ```
 
-Теперь добавьте эти записи в ваш LDAP-каталог с помощью команды `ldapadd`:
+### 4.2. Загрузка OU в каталог
 
 ```bash
-sudo ldapadd -x -D cn=admin,dc=corp,dc=local -W -f base.ldif
+ldapadd -x -D "cn=admin,dc=corp,dc=local" -W -f ~/base.ldif
 ```
 
-Разберем ключи команды:
-*   `-x`: использовать простую аутентификацию.
-*   `-D`: `cn=admin,dc=corp,dc=local` — **Distinguished Name (DN)** администратора LDAP. Замените суффикс на свой.
-*   `-W`: будет запрошен пароль администратора.
-*   `-f`: путь к вашему LDIF-файлу.
+Система запросит пароль администратора. При успехе вы увидите:
 
-Система запросит пароль администратора и, при успешном выполнении, выведет `adding new entry "ou=people..."`.
+```
+adding new entry "ou=people,dc=corp,dc=local"
+adding new entry "ou=groups,dc=corp,dc=local"
+```
 
-### 2. Добавление пользователя (inetOrgPerson + posixAccount)
-
-Для хранения Unix-атрибутов (UID, GID, домашняя директория, shell) используются объектные классы `posixAccount` и `shadowAccount`, а для хранения имени, фамилии и email — `inetOrgPerson`.
-
-Создайте файл `adduser.ldif`:
+### 4.3. Проверка
 
 ```bash
-sudo nano adduser.ldif
+ldapsearch -x -LLL -b "dc=corp,dc=local" "(objectClass=organizationalUnit)" dn
 ```
 
-Заполните его, подставив свои значения. Обратите внимание, что DN пользователя состоит из `uid`, `ou=people` и вашего доменного суффикса.
+Должны отобразиться два DN: `ou=people,...` и `ou=groups,...`.
+
+---
+
+## Часть 5. Создание группы
+
+Создадим группу `developers` с GID 5001.
+
+### 5.1. Создание LDIF-файла
+
+```bash
+nano ~/addgroup.ldif
+```
+
+Содержимое:
 
 ```ldif
-dn: uid=john,ou=people,dc=corp,dc=local
+dn: cn=developers,ou=groups,dc=corp,dc=local
+objectClass: posixGroup
+cn: developers
+gidNumber: 5001
+```
+
+### 5.2. Загрузка группы
+
+```bash
+ldapadd -x -D "cn=admin,dc=corp,dc=local" -W -f ~/addgroup.ldif
+```
+
+### 5.3. Проверка
+
+```bash
+ldapsearch -x -LLL -b "cn=developers,ou=groups,dc=corp,dc=local" cn gidNumber
+```
+
+
+
+---
+
+## Часть 6. Создание пользователя
+
+Создадим пользователя `ivan.petrov` с UID 10001.
+
+### 6.1. Генерация хэша пароля
+
+Пароль нельзя хранить в открытом виде. Сгенерируйте хэш:
+
+```bash
+slappasswd -h '{SSHA}'
+```
+
+Введите пароль дважды. Утилита выдаст строку вида `{SSHA}xxxxxxxxxxxxxxxxxxxxxxxx`. **Скопируйте её**.
+
+
+
+### 6.2. Создание LDIF-файла
+
+```bash
+nano ~/adduser.ldif
+```
+
+Содержимое (замените `{SSHA}...` на полученный хэш):
+
+```ldif
+dn: uid=ivan.petrov,ou=people,dc=corp,dc=local
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
-cn: John Doe
-sn: Doe
-uid: john
-uidNumber: 1001
-gidNumber: 1001
-homeDirectory: /home/john
+uid: ivan.petrov
+cn: Ivan Petrov
+sn: Petrov
+givenName: Ivan
+mail: ivan.petrov@corp.local
+uidNumber: 10001
+gidNumber: 5001
+homeDirectory: /home/ivan.petrov
 loginShell: /bin/bash
-userPassword: {CRYPT}зашифрованный_пароль
+userPassword: {SSHA}xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-#### Как получить зашифрованный пароль?
+**Важно:** `gidNumber` пользователя должен совпадать с `gidNumber` группы, в которую он входит (в нашем случае — 5001).
 
-Так как хранить пароль в открытом виде небезопасно, его нужно зашифровать. Используйте утилиту `slappasswd`:
+### 6.3. Загрузка пользователя
 
 ```bash
-slappasswd
+ldapadd -x -D "cn=admin,dc=corp,dc=local" -W -f ~/adduser.ldif
 ```
 
-Команда запросит пароль дважды и выдаст строку, начинающуюся с `{CRYPT}` или `{SSHA}`. Скопируйте эту строку целиком и вставьте её в поле `userPassword` в файле `adduser.ldif`, заменив `зашифрованный_пароль`.
-
-**Важно:** Значения `uidNumber` и `gidNumber` должны быть уникальными для каждого пользователя в пределах вашего каталога. `gidNumber` будет соответствовать основной группе пользователя (ее мы создадим далее).
-
-Добавьте пользователя в LDAP:
+### 6.4. Проверка
 
 ```bash
-sudo ldapadd -x -D cn=admin,dc=corp,dc=local -W -f adduser.ldif
+ldapsearch -x -LLL -b "ou=people,dc=corp,dc=local" "(uid=ivan.petrov)" cn mail uidNumber
 ```
 
-### 3. Добавление группы (posixGroup)
 
-Пользователям Linux необходима группа. Группа в LDAP описывается объектным классом `posixGroup`.
 
-Создайте файл `addgroup.ldif`:
+---
+
+## Часть 7. Проверка аутентификации
+
+Убедимся, что пользователь может аутентифицироваться в LDAP:
 
 ```bash
-sudo nano addgroup.ldif
+ldapwhoami -x -D "uid=ivan.petrov,ou=people,dc=corp,dc=local" -W
 ```
 
-Содержимое файла (замените `john` и `1001` на ваши значения):
+Введите пароль пользователя. При успехе вы увидите:
+
+```
+dn:uid=ivan.petrov,ou=people,dc=corp,dc=local
+```
+
+---
+
+## Часть 8. Просмотр всех объектов каталога
+
+### 8.1. Все объекты
+
+```bash
+ldapsearch -x -LLL -D "cn=admin,dc=corp,dc=local" -W \
+  -b "dc=corp,dc=local" \
+  "(objectClass=*)"
+```
+
+### 8.2. Только DN
+
+```bash
+ldapsearch -x -LLL -D "cn=admin,dc=corp,dc=local" -W \
+  -b "dc=corp,dc=local" \
+  "(objectClass=*)" dn
+```
+
+### 8.3. Просмотр конфигурации
+
+```bash
+sudo ldapsearch -Y EXTERNAL -H ldapi:/// -LLL -b "cn=config" "(objectClass=*)" dn
+```
+
+### 8.4. Резервное копирование всей базы
+
+```bash
+sudo slapcat -b "dc=corp,dc=local" -l ~/ldap-backup.ldif
+```
+
+
+
+---
+
+## Часть 9. Изменение и удаление записей (дополнительно)
+
+### 9.1. Изменение атрибута
+
+Создайте файл `modify.ldif`:
 
 ```ldif
-dn: cn=john,ou=groups,dc=corp,dc=local
-objectClass: posixGroup
-cn: john
-gidNumber: 1001
-memberUid: john
+dn: uid=ivan.petrov,ou=people,dc=corp,dc=local
+changetype: modify
+replace: mail
+mail: i.petrov@corp.local
 ```
 
-*   `cn`: имя группы. Обычно совпадает с именем пользователя для его основной группы.
-*   `gidNumber`: должен совпадать со значением `gidNumber` из записи пользователя.
-*   `memberUid`: указывает, какой пользователь входит в эту группу.
-
-Добавьте группу:
+Примените:
 
 ```bash
-sudo ldapadd -x -D cn=admin,dc=corp,dc=local -W -f addgroup.ldif
+ldapmodify -x -D "cn=admin,dc=corp,dc=local" -W -f ~/modify.ldif
 ```
 
-### Проверка результата
-
-Чтобы убедиться, что пользователь и группа успешно добавлены, выполните поиск в каталоге:
+### 9.2. Удаление пользователя
 
 ```bash
-ldapsearch -x -b "dc=corp,dc=local" "(uid=john)"
+ldapdelete -x -D "cn=admin,dc=corp,dc=local" -W \
+  "uid=ivan.petrov,ou=people,dc=corp,dc=local"
 ```
 
-Эта команда покажет все атрибуты созданной вами записи пользователя `john`.
+---
+
