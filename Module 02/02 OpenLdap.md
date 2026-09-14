@@ -18,14 +18,14 @@ sudo apt install slapd ldap-utils
 sudo nano base.ldif
 ```
 
-Вставьте в него следующее содержимое, **обязательно заменив** `dc=srv,dc=unlix.ru` на ваше доменное имя (суффикс), которое вы указали при установке slapd:
+Вставьте в него следующее содержимое, **обязательно заменив** `dc=corp,dc=local` на ваше доменное имя (суффикс), которое вы указали при установке slapd:
 
 ```ldif
-dn: ou=people,dc=srv,dc=unlix.ru
+dn: ou=people,dc=corp,dc=local
 objectClass: organizationalUnit
 ou: people
 
-dn: ou=groups,dc=srv,dc=unlix.ru
+dn: ou=groups,dc=corp,dc=local
 objectClass: organizationalUnit
 ou: groups
 ```
@@ -33,12 +33,12 @@ ou: groups
 Теперь добавьте эти записи в ваш LDAP-каталог с помощью команды `ldapadd`:
 
 ```bash
-sudo ldapadd -x -D cn=admin,dc=srv,dc=unlix.ru -W -f base.ldif
+sudo ldapadd -x -D cn=admin,dc=corp,dc=local -W -f base.ldif
 ```
 
 Разберем ключи команды:
 *   `-x`: использовать простую аутентификацию.
-*   `-D`: `cn=admin,dc=srv,dc=unlix.ru` — **Distinguished Name (DN)** администратора LDAP. Замените суффикс на свой.
+*   `-D`: `cn=admin,dc=corp,dc=local` — **Distinguished Name (DN)** администратора LDAP. Замените суффикс на свой.
 *   `-W`: будет запрошен пароль администратора.
 *   `-f`: путь к вашему LDIF-файлу.
 
@@ -57,7 +57,7 @@ sudo nano adduser.ldif
 Заполните его, подставив свои значения. Обратите внимание, что DN пользователя состоит из `uid`, `ou=people` и вашего доменного суффикса.
 
 ```ldif
-dn: uid=john,ou=people,dc=srv,dc=unlix.ru
+dn: uid=john,ou=people,dc=corp,dc=local
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -86,7 +86,7 @@ slappasswd
 Добавьте пользователя в LDAP:
 
 ```bash
-sudo ldapadd -x -D cn=admin,dc=srv,dc=unlix.ru -W -f adduser.ldif
+sudo ldapadd -x -D cn=admin,dc=corp,dc=local -W -f adduser.ldif
 ```
 
 ### 3. Добавление группы (posixGroup)
@@ -102,7 +102,7 @@ sudo nano addgroup.ldif
 Содержимое файла (замените `john` и `1001` на ваши значения):
 
 ```ldif
-dn: cn=john,ou=groups,dc=srv,dc=unlix.ru
+dn: cn=john,ou=groups,dc=corp,dc=local
 objectClass: posixGroup
 cn: john
 gidNumber: 1001
@@ -116,7 +116,7 @@ memberUid: john
 Добавьте группу:
 
 ```bash
-sudo ldapadd -x -D cn=admin,dc=srv,dc=unlix.ru -W -f addgroup.ldif
+sudo ldapadd -x -D cn=admin,dc=corp,dc=local -W -f addgroup.ldif
 ```
 
 ### Проверка результата
@@ -124,7 +124,7 @@ sudo ldapadd -x -D cn=admin,dc=srv,dc=unlix.ru -W -f addgroup.ldif
 Чтобы убедиться, что пользователь и группа успешно добавлены, выполните поиск в каталоге:
 
 ```bash
-ldapsearch -x -b "dc=srv,dc=unlix.ru" "(uid=john)"
+ldapsearch -x -b "dc=corp,dc=local" "(uid=john)"
 ```
 
 Эта команда покажет все атрибуты созданной вами записи пользователя `john`.
