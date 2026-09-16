@@ -7,7 +7,7 @@
 # nano /etc/resolv.conf
 ```
 ```
-search corp.ru
+search corp.local
 nameserver 192.168.10.10
 ```
 Задача 2 : Настройка Kerberos клиента
@@ -22,7 +22,7 @@ nameserver 192.168.10.10
 ```
 ```
 [libdefaults]
-    default_realm = CORP.RU
+    default_realm = corp.local
 ```
 Тестирование
 ```
@@ -81,9 +81,9 @@ gate:~# tail -f /var/log/squid/access.log
 Настройка DNS сервера
 
 ```
-gate.corp.ru  A  192.168.10.1
+gate.corp.local  A  192.168.10.1
 
-1.10.168.192.in-addr.arpa PTR gate.corp.ru
+1.10.168.192.in-addr.arpa PTR gate.corp.local
 ```
 Задача 3 : Аутентификация доступа к SQUID GSSAPI
 
@@ -98,11 +98,11 @@ Password: Pa$$w0rd
 ```
 C:\>setspn -L gatehttp
 
-C:\>ktpass -princ HTTP/gate.corp.ru@CORP.ru -mapuser gatehttp -pass 'Pa$$w0rd' -out gatehttp.keytab
+C:\>ktpass -princ HTTP/gate.corp.local@corp.local -mapuser gatehttp -pass 'Pa$$w0rd' -out gatehttp.keytab
 
 C:\>setspn -L gatehttp
 
-C:\>setspn -Q HTTP/gate.corp.ru
+C:\>setspn -Q HTTP/gate.corp.local
 ```
 Копируем ключ сервиса http сервер squid
 ```
