@@ -1,223 +1,341 @@
-# Лабораторная работа №17: «Защита OpenLDAP с помощью SSL/TLS и Kerberos»
+# Лабораторная работа: «Развертывание Kerberos 5 с интеграцией DNS BIND и PKI»
 
-**Цель работы:** Научиться защищать службу каталогов OpenLDAP с помощью шифрования трафика (SSL/TLS) и аутентификации через Kerberos (SASL/GSSAPI). Освоить настройку сертификатов, keytab-файлов и проверку защищённых соединений.
+**Цель работы:** Научиться развертывать центр распространения ключей Kerberos 5 (KDC) на Debian, интегрировать его с DNS-сервером BIND для автоматического обнаружения KDC, настроить клиентскую часть и проверить аутентификацию. Также закрепить навыки работы с уже развернутым центром сертификации (CA) на узле `gate`.
 
-**Стенд:** Три виртуальные машины Debian:
+**Стенд:** Две виртуальные машины Debian:
 
 | Узел | Роль | IP-адрес | FQDN |
 |------|------|----------|------|
-| **gate** | KDC (Kerberos) — уже развёрнут | <ip gate> | `gate.corp.local` |
-| **server** | OpenLDAP (slapd) | <ip server> | `server.corp.local` |
-| **client** | Клиент LDAP | <ip client> | `client.corp.local` |
+| **gate** | KDC (Kerberos) + DNS BIND + CA (PKI) | <ip gate> | `gate.corp.local` |
+| **server** | Клиент Kerberos | <ip server> | `server.corp.local` |
 
+**Домен:** `CORP.LOCAL`
 **Realm:** `CORP.LOCAL`
 
-**Важно:** KDC на `gate` уже настроен и работает. Нам нужно настроить OpenLDAP на `server` и проверить работу с `client`.
+**Предварительные требования:**
+- На узле `gate` уже развернут центр сертификации (CA) согласно лабораторной работе [«Использование PKI»](https://github.com/DenisMikhaylov/Linux4v2/blob/main/Module%2002/03%20PKI.md). Корневой сертификат CA доступен по адресу `http://server.corp.local/ca.crt` (или `http://gate.corp.local/ca.crt`).
+- Время на обоих узлах синхронизировано (разница не более 5 минут).
+- Доступ к root или sudo на обоих узлах.
 
 ---
 
 ## Теоретическая справка
 
-### Зачем защищать OpenLDAP?
+### Что такое Kerberos?
 
-По умолчанию OpenLDAP передаёт данные в открытом виде по порту 389. Это означает, что логины, пароли и содержимое каталога могут быть перехвачены. Для защиты используются два уровня:
+**Kerberos** — это сетевой протокол аутентификации, использующий концепцию «доверенной третьей стороны». Вместо передачи пароля по сети, Kerberos выдает клиенту **билеты (tickets)**, которые подтверждают его личность. Центральный сервер — **KDC (Key Distribution Center)** — состоит из двух служб: **AS** (выдает TGT) и **TGS** (выдает сервисные билеты).
 
-1. **SSL/TLS** — шифрует канал связи между клиентом и сервером.
-2. **Kerberos/SASL/GSSAPI** — обеспечивает аутентификацию без передачи пароля по сети.
+### Зачем нужен DNS для Kerberos?
 
-### StartTLS vs LDAPS
+Kerberos-клиенты могут автоматически находить KDC с помощью специальных **SRV-записей** в DNS. Это избавляет от необходимости вручную прописывать адрес KDC в конфигурации каждого клиента. Записи имеют вид:
 
-| Характеристика | StartTLS | LDAPS |
-|----------------|----------|-------|
-| Порт | 389 | 636 |
-| Механизм | Апгрейд существующего соединения до TLS | TLS с самого начала |
-| Статус | Уязвим к downgrade-атакам | Рекомендуется |
+- `_kerberos._udp.CORP.LOCAL` — для UDP-запросов (порт 88)
+- `_kerberos._tcp.CORP.LOCAL` — для TCP-запросов (порт 88)
+- `_kpasswd._udp.CORP.LOCAL` — для смены пароля (порт 464)
 
-### Как работает GSSAPI-аутентификация
+### Роль PKI в инфраструктуре Kerberos
 
-1. Пользователь выполняет `kinit` и получает TGT от KDC.
-2. Клиент запрашивает у KDC сервисный билет для принципала `ldap/server.corp.local@CORP.LOCAL`.
-3. Клиент передаёт билет серверу LDAP через SASL/GSSAPI.
-4. Сервер проверяет билет с помощью keytab-файла.
-5. Аутентификация успешна — пароль не передавался по сети.
+Центр сертификации (CA) на `gate` может использоваться для:
+- Выдачи сертификатов для служб Kerberos (например, для **PKINIT** — аутентификации по сертификатам вместо пароля).
+- Подписи сертификатов для веб-сервисов (как в лабораторной работе по PKI).
+- Обеспечения доверенной цепочки сертификатов внутри домена `corp.local`.
+
+В данной лабораторной работе мы **не будем настраивать PKINIT**, но убедимся, что CA доступен и может быть использован для проверки подлинности.
+
+### Ключевые понятия
+
+| Термин | Значение |
+|--------|----------|
+| **Realm** | Административная область Kerberos (CORP.LOCAL) |
+| **Principal** | Уникальная идентичность (ivan@CORP.LOCAL) |
+| **KDC** | Центр выдачи ключей (AS + TGS) |
+| **TGT** | Мастер-билет для получения других билетов |
+| **Keytab** | Файл с долговременными ключами для сервисов |
+| **kinit** | Утилита получения TGT |
+| **klist** | Утилита просмотра билетов |
+| **kdestroy** | Утилита удаления билетов |
 
 ---
 
-## Часть 1: Настройка SSL/TLS на сервере OpenLDAP (server)
+## Часть 1: Подготовка узлов (на обоих серверах)
 
-### Шаг 1.1: Установка OpenLDAP и утилит
+### Шаг 1.1: Настройка имён хостов
+
+**На сервере gate:**
+```bash
+sudo hostnamectl set-hostname gate.corp.local
+```
+
+**На сервере server:**
+```bash
+sudo hostnamectl set-hostname server.corp.local
+```
+
+### Шаг 1.2: Настройка /etc/hosts
+
+На **обоих** серверах добавьте записи в `/etc/hosts`:
+
+```bash
+sudo nano /etc/hosts
+```
+
+Добавьте:
+```
+<ip gate>    gate.corp.local    gate
+<ip server>    server.corp.local  server
+```
+
+Проверьте:
+```bash
+hostname -f
+# На gate: gate.corp.local
+# На server: server.corp.local
+```
+
+### Шаг 1.3: Синхронизация времени
+
+На **обоих** серверах установите и запустите `chrony`:
 
 ```bash
 sudo apt update
-sudo apt install -y slapd ldap-utils gnutls-bin ssl-cert
+sudo apt install -y chrony
+sudo systemctl enable --now chrony
 ```
 
-При установке `slapd` укажите:
-- **Administrator password:** задайте пароль администратора LDAP.
-- **DNS domain name:** `corp.local`
-- **Organization name:** `Corp`
-- **Database backend:** `MDB`
-
-Проверьте статус:
+Проверьте синхронизацию:
 ```bash
-sudo systemctl status slapd --no-pager
-```
-
-### Шаг 1.2: Создание сертификатов
-
-Создадим собственный удостоверяющий центр (CA) и сертификат сервера.
-
-```bash
-# Создание приватного ключа CA
-sudo certtool --generate-privkey --outfile /etc/ssl/private/ca.key
-
-# Шаблон для CA
-cat > /tmp/ca.info << EOF
-cn = Corp Local CA
-ca
-cert_signing_key
-expiration_days = 3650
-EOF
-
-# Создание самоподписанного сертификата CA
-sudo certtool --generate-self-signed \
-    --load-privkey /etc/ssl/private/ca.key \
-    --template /tmp/ca.info \
-    --outfile /etc/ssl/certs/ca.pem
-
-# Приватный ключ сервера LDAP
-sudo certtool --generate-privkey --outfile /etc/ssl/private/ldap.key
-
-# Шаблон для сертификата сервера
-cat > /tmp/ldap.info << EOF
-organization = Corp
-cn = server.corp.local
-tls_www_server
-encryption_key
-signing_key
-expiration_days = 365
-EOF
-
-# Генерация сертификата сервера
-sudo certtool --generate-certificate \
-    --load-privkey /etc/ssl/private/ldap.key \
-    --load-ca-certificate /etc/ssl/certs/ca.pem \
-    --load-ca-privkey /etc/ssl/private/ca.key \
-    --template /tmp/ldap.info \
-    --outfile /etc/ssl/certs/ldap.pem
-```
-
-### Шаг 1.3: Установка прав на файлы
-
-Файлы должны быть доступны пользователю `openldap`, под которым работает `slapd`.
-
-```bash
-# Группа ssl-cert имеет доступ к /etc/ssl/private
-sudo adduser openldap ssl-cert
-
-# Установка прав
-sudo chown root:ssl-cert /etc/ssl/private/ldap.key
-sudo chmod 640 /etc/ssl/private/ldap.key
-
-sudo chown root:root /etc/ssl/certs/ldap.pem
-sudo chmod 644 /etc/ssl/certs/ldap.pem
-
-sudo chown root:root /etc/ssl/certs/ca.pem
-sudo chmod 644 /etc/ssl/certs/ca.pem
-```
-
-### Шаг 1.4: Настройка TLS в slapd
-
-Конфигурация OpenLDAP хранится в `cn=config`. Настроим TLS через `ldapmodify`.
-
-```bash
-cat > /tmp/tls.ldif << EOF
-dn: cn=config
-changetype: modify
-add: olcTLSCACertificateFile
-olcTLSCACertificateFile: /etc/ssl/certs/ca.pem
--
-add: olcTLSCertificateFile
-olcTLSCertificateFile: /etc/ssl/certs/ldap.pem
--
-add: olcTLSCertificateKeyFile
-olcTLSCertificateKeyFile: /etc/ssl/private/ldap.key
-EOF
-
-sudo ldapmodify -H ldapi:/// -Y EXTERNAL -f /tmp/tls.ldif
-```
-
-Ожидаемый вывод:
-```
-modifying entry "cn=config"
-```
-
-### Шаг 1.5: Включение LDAPS (порт 636)
-
-Отредактируйте `/etc/default/slapd`:
-
-```bash
-sudo nano /etc/default/slapd
-```
-
-Найдите строку `SLAPD_SERVICES` и добавьте `ldaps:///`:
-
-```
-SLAPD_SERVICES="ldap:/// ldapi:/// ldaps:///"
-```
-
-Перезапустите службу:
-
-```bash
-sudo systemctl restart slapd
-sudo systemctl status slapd --no-pager
-```
-
-### Шаг 1.6: Проверка TLS на сервере
-
-```bash
-# Проверка StartTLS
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldap://server.corp.local -ZZ -x
-```
-
-Ожидаемый вывод: `anonymous`
-
-```bash
-# Проверка LDAPS
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldaps://server.corp.local:636 -x
-```
-
-Ожидаемый вывод: `anonymous`
-
-Если возникают ошибки, добавьте `-d 1` для отладки:
-```bash
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldap://server.corp.local -ZZ -x -d 1 2>&1 | grep TLS
+chronyc tracking
 ```
 
 ---
 
-## Часть 2: Настройка Kerberos/GSSAPI на сервере OpenLDAP (server)
+## Часть 2: Развертывание DNS BIND на сервере gate
 
-### Шаг 2.1: Установка клиента Kerberos
+### Шаг 2.1: Установка BIND
 
 ```bash
-sudo apt install -y krb5-user libsasl2-modules-gssapi-mit sasl2-bin
+sudo apt install -y bind9 bind9utils bind9-doc
 ```
 
-При установке укажите:
-- **Default realm:** `CORP.LOCAL`
-- **KDC:** `gate.corp.local`
-- **Admin server:** `gate.corp.local`
+### Шаг 2.2: Настройка глобальных параметров BIND
 
-Скопируйте `/etc/krb5.conf` с KDC или создайте вручную:
+Отредактируйте `/etc/bind/named.conf.options`:
+
+```bash
+sudo nano /etc/bind/named.conf.options
+```
+
+Приведите файл к следующему виду:
+
+```
+acl internals {
+    127.0.0.0/8;
+    192.168.1.0/24;
+};
+
+options {
+    directory "/var/cache/bind";
+
+    // Отключаем проверку DNSSEC для внутренней зоны
+    dnssec-validation no;
+
+    // Слушаем только на внутреннем интерфейсе
+    listen-on port 53 { <ip gate>; 127.0.0.1; };
+    listen-on-v6 { none; };
+
+    // Разрешаем запросы только из внутренней сети
+    allow-query { internals; };
+    allow-query-cache { internals; };
+    allow-recursion { internals; };
+
+    // Форвардеры для внешних запросов
+    forwarders {
+        8.8.8.8;
+        8.8.4.4;
+    };
+
+    // Минимальные ответы для совместимости
+    minimal-responses yes;
+};
+```
+
+### Шаг 2.3: Создание зоны прямого просмотра
+
+Отредактируйте `/etc/bind/named.conf.local`:
+
+```bash
+sudo nano /etc/bind/named.conf.local
+```
+
+Добавьте:
+
+```
+zone "corp.local" {
+    type master;
+    file "/etc/bind/db.corp.local";
+    allow-update { none; };
+};
+```
+
+### Шаг 2.4: Создание файла зоны
+
+Скопируйте шаблон:
+
+```bash
+sudo cp /etc/bind/db.local /etc/bind/db.corp.local
+sudo nano /etc/bind/db.corp.local
+```
+
+Приведите файл к следующему виду:
+
+```
+$TTL    604800
+@       IN      SOA     gate.corp.local. admin.corp.local. (
+                              2         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@       IN      NS      gate.corp.local.
+@       IN      A       <ip gate>
+gate    IN      A       <ip gate>
+server  IN      A       <ip server>
+```
+
+### Шаг 2.5: Добавление SRV-записей Kerberos
+
+Добавьте в конец файла `db.corp.local` следующие записи:
+
+```
+; Kerberos KDC discovery
+_kerberos._udp.CORP.LOCAL.    IN  SRV  0 0 88  gate.corp.local.
+_kerberos._tcp.CORP.LOCAL.    IN  SRV  0 0 88  gate.corp.local.
+_kpasswd._udp.CORP.LOCAL.     IN  SRV  0 0 464 gate.corp.local.
+_kpasswd._tcp.CORP.LOCAL.     IN  SRV  0 0 464 gate.corp.local.
+
+; Kerberos master server
+_kerberos-master._udp.CORP.LOCAL. IN SRV 0 0 88 gate.corp.local.
+_kerberos-master._tcp.CORP.LOCAL. IN SRV 0 0 88 gate.corp.local.
+```
+
+> **Важно:** Имя realm в SRV-записях должно быть в **ВЕРХНЕМ РЕГИСТРЕ** (`CORP.LOCAL`), так как Kerberos чувствителен к регистру в именах realm.
+
+### Шаг 2.6: Создание зоны обратного просмотра
+
+Для корректной работы Kerberos часто требуется обратное разрешение имён. Создайте зону для сети `192.168.1.0/24`.
+
+В `/etc/bind/named.conf.local` добавьте:
+
+```
+zone "1.168.192.in-addr.arpa" {
+    type master;
+    file "/etc/bind/db.192.168.1";
+    allow-update { none; };
+};
+```
+
+Создайте файл зоны:
+
+```bash
+sudo nano /etc/bind/db.192.168.1
+```
+
+Содержимое:
+
+```
+$TTL    604800
+@       IN      SOA     gate.corp.local. admin.corp.local. (
+                              2         ; Serial
+                         604800         ; Refresh
+                          86400         ; Retry
+                        2419200         ; Expire
+                         604800 )       ; Negative Cache TTL
+;
+@       IN      NS      gate.corp.local.
+10      IN      PTR     gate.corp.local.
+20      IN      PTR     server.corp.local.
+```
+
+### Шаг 2.7: Проверка синтаксиса и запуск BIND
+
+```bash
+# Проверка конфигурации
+sudo named-checkconf
+
+# Проверка зон
+sudo named-checkzone corp.local /etc/bind/db.corp.local
+sudo named-checkzone 1.168.192.in-addr.arpa /etc/bind/db.192.168.1
+
+# Запуск BIND
+sudo systemctl enable --now bind9
+sudo systemctl status bind9 --no-pager
+```
+
+### Шаг 2.8: Настройка resolv.conf на обоих серверах
+
+На **gate** и **server** укажите DNS-сервер:
+
+```bash
+sudo nano /etc/resolv.conf
+```
+
+Содержимое:
+```
+nameserver <ip gate>
+search corp.local
+```
+
+### Шаг 2.9: Проверка DNS
+
+```bash
+# Проверка прямого разрешения
+dig gate.corp.local A +short
+# Ожидаем: <ip gate>
+
+dig server.corp.local A +short
+# Ожидаем: <ip server>
+
+# Проверка SRV-записей
+dig _kerberos._udp.CORP.LOCAL SRV +short
+# Ожидаем: 0 0 88 gate.corp.local.
+
+# Проверка обратного разрешения
+dig -x <ip gate> +short
+# Ожидаем: gate.corp.local.
+```
+
+---
+
+## Часть 3: Развертывание KDC на сервере gate
+
+### Шаг 3.1: Установка пакетов KDC
+
+```bash
+sudo apt install -y krb5-kdc krb5-admin-server krb5-user
+```
+
+Во время установки укажите:
+- **Default Kerberos version 5 realm:** `CORP.LOCAL`
+- **Kerberos servers for your realm:** `gate.corp.local`
+- **Administrative server for your Kerberos realm:** `gate.corp.local`
+
+### Шаг 3.2: Настройка /etc/krb5.conf
+
+```bash
+sudo nano /etc/krb5.conf
+```
+
+Приведите к виду:
 
 ```ini
 [libdefaults]
     default_realm = CORP.LOCAL
     dns_lookup_realm = false
-    dns_lookup_kdc = false
+    dns_lookup_kdc = true
     rdns = false
     ticket_lifetime = 24h
+    renew_lifetime = 7d
     forwardable = true
 
 [realms]
@@ -231,9 +349,24 @@ sudo apt install -y krb5-user libsasl2-modules-gssapi-mit sasl2-bin
     corp.local = CORP.LOCAL
 ```
 
-### Шаг 2.2: Создание принципала и keytab на KDC (gate)
+> **Ключевой момент:** Параметр `dns_lookup_kdc = true` позволяет клиентам находить KDC через SRV-записи DNS.
 
-На сервере **gate** выполните:
+### Шаг 3.3: Инициализация базы данных KDC
+
+```bash
+sudo krb5_newrealm
+```
+
+При запросе введите **мастер-пароль** (запомните его — он понадобится для восстановления).
+
+Запустите и включите службы:
+
+```bash
+sudo systemctl enable --now krb5-kdc krb5-admin-server
+sudo systemctl status krb5-kdc --no-pager
+```
+
+### Шаг 3.4: Создание принципалов
 
 ```bash
 sudo kadmin.local
@@ -242,196 +375,197 @@ sudo kadmin.local
 Внутри консоли:
 
 ```
-addprinc -randkey ldap/server.corp.local@CORP.LOCAL
-ktadd -k /tmp/ldap.keytab ldap/server.corp.local@CORP.LOCAL
+# Административный принципал
+addprinc admin/admin
+
+# Пользовательский принципал
+addprinc student1
+
+# Принципал для сервиса (например, host/server.corp.local)
+addprinc -randkey host/server.corp.local
+
+# Выход
 quit
 ```
 
-Скопируйте keytab на сервер **server**:
+Проверьте список принципалов:
 
 ```bash
-# На gate
-sudo scp /tmp/ldap.keytab user@server.corp.local:/tmp/
-
-# На server
-sudo mv /tmp/ldap.keytab /etc/krb5.ldap.keytab
-sudo chown root:openldap /etc/krb5.ldap.keytab
-sudo chmod 640 /etc/krb5.ldap.keytab
+sudo kadmin.local -q "listprincs"
 ```
 
-> **Важно:** Права `640` и владелец `root:openldap` гарантируют, что только `slapd` сможет прочитать keytab.
+---
 
-### Шаг 2.3: Настройка SASL в slapd
+## Часть 4: Настройка клиента на сервере server
 
-Создайте файл конфигурации SASL:
+### Шаг 4.1: Установка клиентских утилит
 
 ```bash
-sudo nano /etc/ldap/sasl2/slapd.conf
+sudo apt install -y krb5-user
 ```
 
-Содержимое:
+При установке укажите те же параметры:
+- Realm: `CORP.LOCAL`
+- KDC: `gate.corp.local`
+- Admin server: `gate.corp.local`
 
+### Шаг 4.2: Настройка /etc/krb5.conf
+
+Скопируйте файл с gate или создайте вручную:
+
+```ini
+[libdefaults]
+    default_realm = CORP.LOCAL
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+    rdns = false
+    ticket_lifetime = 24h
+    renew_lifetime = 7d
+    forwardable = true
+
+[realms]
+    CORP.LOCAL = {
+        kdc = gate.corp.local
+        admin_server = gate.corp.local
+    }
+
+[domain_realm]
+    .corp.local = CORP.LOCAL
+    corp.local = CORP.LOCAL
 ```
-keytab: /etc/krb5.ldap.keytab
-mech_list: GSSAPI
-```
 
-### Шаг 2.4: Указание keytab в конфигурации slapd
-
-Отредактируйте `/etc/default/slapd`:
+### Шаг 4.3: Проверка аутентификации
 
 ```bash
-sudo nano /etc/default/slapd
-```
-
-Раскомментируйте и измените строку:
-
-```
-export KRB5_KTNAME=/etc/krb5.ldap.keytab
-```
-
-Перезапустите службу:
-
-```bash
-sudo systemctl restart slapd
-```
-
-### Шаг 2.5: Проверка GSSAPI на сервере
-
-```bash
-# Получение TGT
-kinit admin@CORP.LOCAL
+# Получение TGT для пользователя student1
+kinit student1
+# Введите пароль
 
 # Проверка билетов
 klist
-
-# Аутентификация через GSSAPI
-ldapwhoami -H ldap://server.corp.local -Y GSSAPI
 ```
 
 Ожидаемый вывод:
 ```
-dn:uid=admin,cn=corp.local,cn=gssapi,cn=auth
+Ticket cache: FILE:/tmp/krb5cc_1000
+Default principal: student1@CORP.LOCAL
+
+Valid starting     Expires            Service principal
+23/07/26 10:00:00  23/07/26 20:00:00  krbtgt/CORP.LOCAL@CORP.LOCAL
 ```
-
----
-
-## Часть 3: Настройка клиента (client)
-
-### Шаг 3.1: Установка клиентских утилит
 
 ```bash
-sudo apt update
-sudo apt install -y ldap-utils krb5-user libsasl2-modules-gssapi-mit
-```
+# Удаление билетов
+kdestroy
 
-Скопируйте `/etc/krb5.conf` с KDC.
-
-Скопируйте CA-сертификат с сервера **server**:
-
-```bash
-# На server
-sudo scp /etc/ssl/certs/ca.pem user@client.corp.local:/tmp/
-
-# На client
-sudo mv /tmp/ca.pem /etc/ssl/certs/ca.pem
-```
-
-### Шаг 3.2: Настройка ldap.conf
-
-```bash
-sudo nano /etc/ldap/ldap.conf
-```
-
-Добавьте:
-
-```
-TLS_CACERT /etc/ssl/certs/ca.pem
-TLS_REQCERT demand
-SASL_MECH GSSAPI
-```
-
-### Шаг 3.3: Проверка TLS с клиента
-
-```bash
-# StartTLS
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldap://server.corp.local -ZZ -x
-# Ожидаем: anonymous
-
-# LDAPS
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldaps://server.corp.local:636 -x
-# Ожидаем: anonymous
-```
-
-### Шаг 3.4: Проверка GSSAPI с клиента
-
-```bash
-# Получение TGT
-kinit admin@CORP.LOCAL
-
-# Проверка билетов
+# Проверка, что билеты удалены
 klist
-
-# Аутентификация через GSSAPI
-ldapwhoami -H ldap://server.corp.local -Y GSSAPI
-# Ожидаем: dn:uid=admin,cn=corp.local,cn=gssapi,cn=auth
+# Должно быть: No credentials cache found
 ```
 
-### Шаг 3.5: Комбинированная проверка (TLS + GSSAPI)
+### Шаг 4.4: Проверка автоматического обнаружения KDC через DNS
+
+Убедитесь, что клиент находит KDC через DNS, а не через конфигурацию:
 
 ```bash
-# StartTLS + GSSAPI
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldap://server.corp.local -ZZ -Y GSSAPI
+# Временно отключите dns_lookup_kdc в /etc/krb5.conf
+# Установите dns_lookup_kdc = false и убедитесь, что kinit всё равно работает
+# (если в [realms] указан KDC)
 
-# LDAPS + GSSAPI
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldaps://server.corp.local:636 -Y GSSAPI
-```
-
-Оба варианта должны вернуть DN аутентифицированного пользователя.
-
-### Шаг 3.6: Поиск в каталоге через защищённое соединение
-
-```bash
-# Поиск с StartTLS + GSSAPI
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem \
-ldapsearch -H ldap://server.corp.local -ZZ -Y GSSAPI -b "dc=corp,dc=local" "(objectClass=*)"
+# Затем включите dns_lookup_kdc = true и удалите секцию [realms]
+# Проверьте, что kinit работает только через DNS
 ```
 
 ---
 
-## Часть 4: Диагностика и устранение проблем
+## Часть 5: Проверка доступности PKI
 
-### Проблемы TLS
+Поскольку на `gate` уже развернут центр сертификации, убедимся, что он доступен.
 
-| Ошибка | Причина | Решение |
-|--------|---------|---------|
-| `TLS init def ctx failed: -1` | Нет прав на файлы сертификатов | `sudo adduser openldap ssl-cert`; проверьте права `640` на ключ |
-| `certificate verify failed` | Неверный CA | Укажите `TLS_CACERT /etc/ssl/certs/ca.pem` |
-| `hostname mismatch` | CN не совпадает | Сертификат должен быть на `server.corp.local` |
-
-### Проблемы Kerberos/GSSAPI
-
-| Ошибка | Причина | Решение |
-|--------|---------|---------|
-| `SASL/GSSAPI authentication failed` | Нет keytab или неверный принципал | `klist -k /etc/krb5.ldap.keytab` |
-| `Clock skew too great` | Рассинхронизация времени | Настройте NTP/chrony на всех узлах |
-| `No worthy mechs found` | Не установлен GSSAPI-плагин | `apt install libsasl2-modules-gssapi-mit` |
-| `Permission denied` (keytab) | Неверные права | `chown root:openldap`, `chmod 640` |
-
-### Отладка
+### Шаг 5.1: Проверка корневого сертификата CA
 
 ```bash
-# Трассировка Kerberos
-KRB5_TRACE=/dev/stderr ldapwhoami -H ldap://server.corp.local -Y GSSAPI
-
-# Отладка TLS
-LDAPTLS_CACERT=/etc/ssl/certs/ca.pem ldapwhoami -H ldap://server.corp.local -ZZ -x -d 1 2>&1 | grep TLS
-
-# Просмотр keytab
-sudo klist -k /etc/krb5.ldap.keytab
-
-# Проверка поддерживаемых SASL-механизмов
-ldapsearch -H ldap://server.corp.local -x -b "" -s base "(objectClass=*)" supportedSASLMechanisms
+# На сервере server
+wget http://gate.corp.local/ca.crt -O /tmp/ca.crt
+openssl x509 -in /tmp/ca.crt -noout -subject -issuer -dates
 ```
 
+Ожидаемый вывод должен показать, что сертификат выпущен для `corp.local` и действителен.
+
+### Шаг 5.2: Проверка цепочки сертификатов (пример)
+
+Если у вас есть сертификат, подписанный CA (например, `www.crt` из лабораторной работы по PKI), проверьте его:
+
+```bash
+openssl verify -CAfile /tmp/ca.crt /path/to/www.crt
+```
+
+### Шаг 5.3: Использование CA для Kerberos (опционально)
+
+В будущем вы можете настроить **PKINIT** — аутентификацию в Kerberos с использованием сертификатов. Для этого потребуется:
+1. Выпустить сертификат для KDC (`gate.corp.local`) с расширением `pkinit`.
+2. Настроить `/etc/krb5kdc/kdc.conf` для использования PKINIT.
+3. Настроить клиентов для использования сертификатов.
+
+Это выходит за рамки данной лабораторной работы, но знание того, что CA доступен, важно для построения полноценной инфраструктуры.
+
 ---
+
+## Часть 6: Диагностика и устранение проблем
+
+### 6.1. Проверка SRV-записей
+
+```bash
+# Проверка всех Kerberos SRV-записей
+dig SRV _kerberos._udp.CORP.LOCAL +short
+dig SRV _kerberos._tcp.CORP.LOCAL +short
+dig SRV _kpasswd._udp.CORP.LOCAL +short
+
+# Использование host
+host -t SRV _kerberos._udp.CORP.LOCAL
+```
+
+### 6.2. Трассировка Kerberos
+
+```bash
+# Подробный вывод kinit
+KRB5_TRACE=/dev/stderr kinit -V student1
+```
+
+Это покажет, какие DNS-запросы выполняются и какой KDC используется.
+
+### 6.3. Проверка BIND
+
+```bash
+# Статус BIND
+sudo systemctl status bind9
+
+# Логи BIND
+sudo journalctl -u bind9 -f
+
+# Проверка зоны
+sudo named-checkzone corp.local /etc/bind/db.corp.local
+```
+
+### 6.4. Типичные ошибки
+
+| Ошибка | Причина | Решение |
+|--------|---------|---------|
+| `Cannot contact any KDC` | SRV-записи не найдены или BIND не работает | Проверьте `dig SRV _kerberos._udp.CORP.LOCAL` |
+| `Server not found in Kerberos database` | Принципал не создан | `sudo kadmin.local -q "listprincs"` |
+| `Clock skew too great` | Рассинхронизация времени | Настройте `chrony` на обоих узлах |
+| `KDC reply did not match expectations` | Ошибка в `krb5.conf` | Проверьте регистр realm и `domain_realm` |
+| `No address associated with hostname` | DNS не разрешает имена | Проверьте `/etc/resolv.conf` |
+| `Certificate verify failed` | Проблемы с CA | Проверьте доступность `http://gate.corp.local/ca.crt` |
+
+---
+
+## Часть 7: Дополнительные задания
+
+1. **Создайте второго пользователя** `student2` и проверьте аутентификацию для него.
+2. **Настройте keytab для службы SSH** на `server` и проверьте Kerberos-аутентификацию в SSH.
+3. **Настройте вторичный KDC** (slave) для отказоустойчивости.
+4. **Создайте политику паролей** в `kadmin.local` с минимальной длиной и сроком действия.
+5. **Настройте логирование BIND** в отдельный файл для аудита SRV-запросов.
+6. **Изучите возможность настройки PKINIT** с использованием CA на `gate` (см. документацию MIT Kerberos).
+
